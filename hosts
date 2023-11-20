@@ -1,0 +1,16 @@
+[database]
+10.0.0.11
+
+[database:vars]
+postresql_version=16
+#Acceptable values: 10, 11, 12, 13, 14, 15, 16, 17, 8.2, 8.3, 8.4, 9.0, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6
+data_dir=/var/lib/postgresql/16/main/
+#Please set new data_dir in format:  /dir-1/../dir-n/
+#Example: "data_dir=/opt/postgresql/main/"
+
+[web]
+10.0.0.11
+
+[app]
+10.0.0.12
+10.0.0.13
