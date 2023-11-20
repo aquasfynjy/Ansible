@@ -1,0 +1,278 @@
+---
+- name: install postgresql
+  hosts: test
+  gather_facts: true
+  become: true
+  vars:
+    config_system_locale: 'ru_RU.UTF-8'
+    config_system_language: 'ru_RU.UTF-8'
+    postgres_password: '123456'
+    pg_params: []
+  tasks:
+  - name: Set timezone to Europe/Moscow
+    timezone:
+      name: Europe/Moscow
+
+    # Устанавливаем локаль.
+  - name: Ensure localisation files for '{{ config_system_locale }}' are available
+    locale_gen:
+      name: "{{ config_system_locale }}"
+      state: present
+
+  - name: Ensure localisation files for '{{ config_system_language }}' are available
+    locale_gen:
+      name: "{{ config_system_language }}"
+      state: present
+
+  - name: Get current locale and language configuration
+    command: localectl status
+    register: locale_status
+    changed_when: false
+
+  - name: Parse 'LANG' from current locale and language configuration
+    set_fact:
+      locale_lang: "{{ locale_status.stdout | regex_search('LANG=([^\n]+)', '\\1') | first }}"
+
+  - name: Parse 'LANGUAGE' from current locale and language configuration
+    set_fact:
+      locale_language: "{{ locale_status.stdout | regex_search('LANGUAGE=([^\n]+)', '\\1') | default([locale_lang], true) | first }}"
+
+  - name: Configure locale to '{{ config_system_locale }}' and language to '{{ config_system_language }}'
+    command: localectl set-locale LANG={{ config_system_locale }} LANGUAGE={{ config_system_language }}
+    changed_when: locale_lang != config_system_locale or locale_language != config_system_language
+
+    # Устанавливаем доп пакеты
+  - name: install packages
+    apt:
+      pkg:
+        - postgresql-client-common
+        - postgresql-common
+        - libxslt1.1
+        - ssl-cert
+        - libllvm6.0
+        - mc
+        - python3-pip
+        - acl
+      state: present
+      update_cache: yes
+
+    # Устанавливаем доп пакеты которых нет в официальном репозитории.
+  - name: install libicu55
+    apt:
+      deb: '{{ item }}'
+    with_items:
+      - http://security.ubuntu.com/ubuntu/pool/main/i/icu/libicu55_55.1-7ubuntu0.5_amd64.deb
+      - http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.0.0_1.0.2g-1ubuntu4.20_amd64.deb
+
+  - name: Add pgdg repo to sources.list.d
+    lineinfile:
+      path: /etc/apt/sources.list.d/pgdg.list
+      line: "deb https://apt.postgresql.org/pub/repos/apt focal-pgdg main"
+      create: true
+
+  - name: Download PostgreSQL key and add it to system keyring
+    apt_key:
+      url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+      state: present
+
+  - name: Update apt cache
+    apt:
+      update_cache: yes
+
+  - name: Install PostgreSQL
+    apt:
+      name: postgresql-{{ postresql_version }}
+      state: present
+
+    # Устанавливаем psycopg2, нужен для postgresql_user и postgresql_set.
+  - name: Make sure psycopg2 is installed
+    apt:
+      pkg:
+        - build-essential
+        - python3-pip
+        - python3-dev
+        - libpq-dev
+      state: present
+
+  - name: psycopg2
+    shell: 'pip3 install psycopg2'
+
+  - name: Set postgres parametres.
+    become: yes
+    become_method: sudo
+    become_user: postgres
+    postgresql_set:
+      name: '{{ item. name }}'
+      value: '{{ item. value }}'
+    register: set
+    with_items: '{{ pg_params }}'
+
+  - name: Stop service postgresql
+    service:
+      name: postgresql
+      state: stopped
+
+  - name: change a str
+    lineinfile:
+      path: /etc/postgresql/{{ postresql_version }}/main/postgresql.conf
+      regexp: "data_directory = '*'"
+      line: "data_directory = '{{ data_dir }}'"
+      state: present
+      backup: true
+
+  - name: mkdir
+    become: true
+    become_user: root
+    file:
+      path: "{{ data_dir }}"
+      owner: postgres
+      group: postgres
+      state: directory
+
+  - name: Copy files.
+    become: true
+    become_user: postgres
+    copy:
+      src: '/var/lib/postgresql/{{postresql_version}}/main/'
+      dest: '{{data_dir}}'
+      remote_src: true
+
+  - name: Restart service postgresql.
+    service:
+      name: postgresql
+      state: started
+
+#Install Docker Ubuntu
+- name: install docker
+  hosts: app
+  tasks:
+  - name: install dependencies
+    become: true
+    apt:
+      name: "{{item}}"
+      state: present
+      update_cache: true
+    loop:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+    when:
+    - "ansible_distribution != 'CentOS'"
+  - name: add GPG key
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+    when:
+    - "ansible_distribution != 'CentOS'"
+
+  - name: add docker repository to apt
+    apt_repository:
+      repo: deb https://download.docker.com/linux/ubuntu bionic stable
+      state: present
+    when:
+    - "ansible_distribution != 'CentOS'"
+
+  - name: install docker
+    apt:
+      name: "{{item}}"
+      state: latest
+      update_cache: yes
+    loop:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    when:
+    - "ansible_distribution != 'CentOS'"
+
+  - name: check docker is active
+    service:
+      name: docker
+      state: started
+      enabled: yes
+    when:
+    - "ansible_distribution != 'CentOS'"
+
+  - name: Ensure group "docker" exists
+    group:
+      name: docker
+      state: present
+    when:
+    - "ansible_distribution != 'CentOS'"
+
+  - name: adding user to docker group
+    user:
+      name: ansible
+      groups: docker
+      append: yes
+    when:
+    - "ansible_distribution != 'CentOS'"
+
+  - name: Install docker-compose
+    get_url:
+      url: https://github.com/docker/compose/releases/download/1.29.2/docker-compose-Linux-x86_64
+      dest: /usr/local/bin/docker-compose
+      mode: 'u+x,g+x'
+    when:
+    - "ansible_distribution != 'CentOS'"
+
+  - name: Change file ownership, group and permissions
+    file:
+      path: /usr/local/bin/docker-compose
+      owner: ansible
+      group: ansible
+    when:
+    - "ansible_distribution != 'CentOS'"
+
+#Install Docker CentOS
+  - name: Install yum utils
+    yum:
+      name: yum-utils
+      state: latest
+    when:
+    - "ansible_distribution == 'CentOS'"
+
+  - name: Install device-mapper-persistent-data
+    yum:
+      name: device-mapper-persistent-data
+      state: latest
+    when:
+    - "ansible_distribution == 'CentOS'"
+
+  - name: Install lvm2
+    yum:
+      name: lvm2
+      state: latest
+    when:
+    - "ansible_distribution == 'CentOS'"
+
+  - name: Add Docker repo
+    get_url:
+      url: https://download.docker.com/linux/centos/docker-ce.repo
+      dest: /etc/yum.repos.d/docker-ce.repo
+    when:
+    - "ansible_distribution == 'CentOS'"
+
+  - name: Install Docker
+    package:
+      name: docker-ce
+      state: latest
+    when:
+    - "ansible_distribution == 'CentOS'"
+
+  - name: Start Docker service
+    service:
+      name: docker
+      state: started
+      enabled: yes
+    when:
+    - "ansible_distribution == 'CentOS'"
+
+  - name: Add user artem to docker group
+    user:
+      name: artem
+      groups: docker
+      append: yes
+    when:
+    - "ansible_distribution == 'CentOS'"
